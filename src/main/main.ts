@@ -8,10 +8,17 @@ import IPCHandlers from './handlers/IPCHandlers.js';
 import TrackerService from './services/TrackerService.js';
 
 // Log environment variable status (without exposing tokens)
+logger.info('========================================');
 logger.info('Environment variables loaded:');
+logger.info('========================================');
 logger.info(`CLICKUP_API_TOKEN: ${process.env.CLICKUP_API_TOKEN ? '✓ Set' : '✗ Not set'}`);
 logger.info(`CLICKUP_LIST_ID: ${process.env.CLICKUP_LIST_ID || '✗ Not set'}`);
 logger.info(`CLICKUP_USER_ID: ${process.env.CLICKUP_USER_ID || '✗ Not set'}`);
+logger.info(`API_BASE_URL: ${process.env.API_BASE_URL || '✗ Not set (will use default: http://localhost:3001)'}`);
+logger.info(`TENANT_ID: ${process.env.TENANT_ID || '✗ Not set'}`);
+logger.info(`PROJECT_ID: ${process.env.PROJECT_ID || '✗ Not set'}`);
+logger.info(`GIT_REPO_PATH: ${process.env.GIT_REPO_PATH || '✗ Not set'}`);
+logger.info('========================================');
 
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
