@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';">
+    <title>SprintCopilot App</title>
+    <link rel="stylesheet" href="assets/styles/main.css">
+</head>
+<body>
+    <div id="app" class="app-container">
+        <header class="app-header">
+            <button class="app-back-button" id="app-back-button" style="display: none;">← Back</button>
+            <div class="app-header-content">
+                <h1 class="app-title">Welcome to SprintCopilot</h1>
+                <p class="app-subtitle">Track your sprint progress with SprintCopilot</p>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <div class="directory-selector-container" id="directory-selector"></div>
+            <div class="workspace-selector" id="workspace-selector" style="display: none;"></div>
+            <div class="task-list" id="task-list" style="display: none;"></div>
+        </main>
+    </div>
+
+    <script type="module" src="scripts/main.js"></script>
+</body>
+</html>
+

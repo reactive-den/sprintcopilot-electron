@@ -1,0 +1,36 @@
+appId: com.sprintcopilot.app
+productName: SprintCopilot
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - assets/**/*
+  - package.json
+  - "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}"
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
