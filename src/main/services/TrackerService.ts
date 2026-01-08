@@ -261,7 +261,8 @@ class TrackerService {
           filepath,
           trackerInfo.tenantId,
           trackerInfo.projectId,
-          trackerInfo.sessionId
+          trackerInfo.sessionId,
+          taskId
         ).then((result) => {
           const uploadDuration = Date.now() - uploadStartTime;
           if (result.success) {
@@ -762,7 +763,8 @@ class TrackerService {
             filepath,
             trackerInfo.tenantId,
             trackerInfo.projectId,
-            trackerInfo.sessionId
+            trackerInfo.sessionId,
+            taskId
           );
 
           if (result.success) {

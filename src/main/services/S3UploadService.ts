@@ -13,6 +13,8 @@ export interface PresignRequest {
   tenantId: string;
   projectId: string;
   sessionId: string;
+  taskId?: string;
+  folderPath?: string;
 }
 
 export interface PresignResponse {
@@ -318,22 +320,40 @@ class S3UploadService {
   }
 
   /**
+   * Generate folder path structure: {taskId}/{date-timestamp}/
+   */
+  private generateFolderPath(taskId: string): string {
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    const timeStr = now.toISOString().split('T')[1].split('.')[0].replace(/:/g, '-'); // HH-MM-SS
+    const timestamp = `${dateStr}_${timeStr}`;
+    return `${taskId}/${timestamp}`;
+  }
+
+  /**
    * Upload screenshot file
    */
   async uploadScreenshot(
     filePath: string,
     tenantId: string,
     projectId: string,
-    sessionId: string
+    sessionId: string,
+    taskId: string
   ): Promise<UploadResult> {
     try {
       logger.info(`[S3Upload] Starting upload process for: ${filePath}`);
-      logger.info(`[S3Upload] Using IDs - tenantId: ${tenantId}, projectId: ${projectId}, sessionId: ${sessionId}`);
+      logger.info(`[S3Upload] Using IDs - tenantId: ${tenantId}, projectId: ${projectId}, sessionId: ${sessionId}, taskId: ${taskId}`);
       logger.info(`[S3Upload] API Base URL: ${this.baseUrl}`);
       
       const stats = await fs.stat(filePath);
-      const fileName = filePath.split('/').pop() || 'screenshot.png';
+      const originalFileName = filePath.split('/').pop() || 'screenshot.png';
       
+      // Generate folder path: {taskId}/{date-timestamp}/
+      const folderPath = this.generateFolderPath(taskId);
+      const fileName = `${folderPath}/screenshots/${originalFileName}`;
+      
+      logger.info(`[S3Upload] Folder structure: ${folderPath}`);
+      logger.info(`[S3Upload] S3 file path: ${fileName}`);
       logger.info(`[S3Upload] File size: ${stats.size} bytes, requesting presigned URL...`);
       
       // Get presigned URL
@@ -344,7 +364,9 @@ class S3UploadService {
         contentLength: stats.size,
         tenantId,
         projectId,
-        sessionId
+        sessionId,
+        taskId,
+        folderPath: folderPath
       });
 
       logger.info(`[S3Upload] Received presigned URL, uploading to S3...`);
@@ -375,11 +397,23 @@ class S3UploadService {
     filePath: string,
     tenantId: string,
     projectId: string,
-    sessionId: string
+    sessionId: string,
+    taskId: string
   ): Promise<UploadResult> {
     try {
+      logger.info(`[S3Upload] Starting repo diff upload for: ${filePath}`);
+      logger.info(`[S3Upload] Using IDs - tenantId: ${tenantId}, projectId: ${projectId}, sessionId: ${sessionId}, taskId: ${taskId}`);
+      
       const stats = await fs.stat(filePath);
-      const fileName = filePath.split('/').pop() || 'diff.txt';
+      const originalFileName = filePath.split('/').pop() || 'diff.txt';
+      
+      // Generate folder path: {taskId}/{date-timestamp}/
+      const folderPath = this.generateFolderPath(taskId);
+      const fileName = `${folderPath}/${originalFileName}`;
+      
+      logger.info(`[S3Upload] Folder structure: ${folderPath}`);
+      logger.info(`[S3Upload] S3 file path: ${fileName}`);
+      logger.info(`[S3Upload] File size: ${stats.size} bytes, requesting presigned URL...`);
       
       // Get presigned URL
       const presignResponse = await this.getPresignedUrl({
@@ -389,7 +423,9 @@ class S3UploadService {
         contentLength: stats.size,
         tenantId,
         projectId,
-        sessionId
+        sessionId,
+        taskId,
+        folderPath: folderPath
       });
 
       // Upload to S3
