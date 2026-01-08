@@ -2,6 +2,7 @@ import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as fsSync from 'fs';
 import { exec } from 'child_process';
+import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 // @ts-ignore - screenshot-desktop doesn't have types
@@ -9,7 +10,10 @@ import screenshot from 'screenshot-desktop';
 import { GlobalKeyboardListener } from 'node-global-key-listener';
 import logger from '../utils/logger.js';
 import { getUserDataPath } from '../utils/paths.js';
+import S3UploadService from './S3UploadService.js';
 import type { TrackerConfig, TrackerInfo, InputLogger, InputEvent, ScreenshotMetadata, TrackerStatus, TrackerMetadata } from '../../types/index.js';
+
+const execAsync = promisify(exec);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -32,7 +36,7 @@ const loadRobot = async () => {
 
 // Configuration - Easy to change
 const TRACKER_CONFIG: TrackerConfig = {
-  SCREENSHOT_INTERVAL: 1 * 60 * 1000, // 1 minute in milliseconds (for testing)
+  SCREENSHOT_INTERVAL: 5 * 1000, // 5 seconds in milliseconds
   // For production: 5 * 60 * 1000 (5 minutes) or 10 * 60 * 1000 (10 minutes)
 
   ENABLE_KEYBOARD_TRACKING: true,
@@ -47,6 +51,10 @@ const TRACKER_CONFIG: TrackerConfig = {
 interface ExtendedTrackerInfo extends TrackerInfo {
   endTime?: Date;
   duration?: number;
+  tenantId?: string;
+  projectId?: string;
+  sessionId?: string;
+  gitRepoPath?: string;
 }
 
 class TrackerService {
@@ -93,7 +101,11 @@ class TrackerService {
       keyboardEvents: [],
       mouseEvents: [],
       metadataLogs: [],
-      running: true
+      running: true,
+      tenantId: taskInfo.tenantId || process.env.TENANT_ID || 'default_tenant',
+      projectId: taskInfo.projectId || process.env.PROJECT_ID || 'default_project',
+      sessionId: taskInfo.sessionId || `${taskId}-${Date.now()}`,
+      gitRepoPath: taskInfo.gitRepoPath || process.env.GIT_REPO_PATH
     };
 
     this.activeTrackers.set(taskId, trackerInfo);
@@ -149,6 +161,13 @@ class TrackerService {
     }
 
     this.saveMetadataLog(taskId, trackerInfo);
+
+    // Generate and upload git diff if repo path is available
+    if (trackerInfo.gitRepoPath && trackerInfo.tenantId && trackerInfo.projectId && trackerInfo.sessionId) {
+      this.generateAndUploadGitDiff(taskId, trackerInfo).catch((error) => {
+        logger.error(`Failed to generate/upload git diff for task ${taskId}:`, error);
+      });
+    }
 
     // Generate summary
     const summary: TrackerMetadata = {
@@ -229,6 +248,36 @@ class TrackerService {
 
       trackerInfo.screenshotCount++;
       trackerInfo.screenshots.push(screenshotMetadata);
+
+      // Upload screenshot to S3 (async, don't wait)
+      logger.info(`[Screenshot] Checking upload conditions for ${filename}...`);
+      logger.info(`[Screenshot] tenantId: ${trackerInfo.tenantId}, projectId: ${trackerInfo.projectId}, sessionId: ${trackerInfo.sessionId}`);
+      
+      if (trackerInfo.tenantId && trackerInfo.projectId && trackerInfo.sessionId) {
+        logger.info(`[Screenshot] ✓ All IDs present, starting S3 upload for: ${filename} (task: ${taskId})`);
+        const uploadStartTime = Date.now();
+        
+        S3UploadService.uploadScreenshot(
+          filepath,
+          trackerInfo.tenantId,
+          trackerInfo.projectId,
+          trackerInfo.sessionId,
+          taskId
+        ).then((result) => {
+          const uploadDuration = Date.now() - uploadStartTime;
+          if (result.success) {
+            logger.info(`[Screenshot] ✓ Upload completed in ${uploadDuration}ms: ${filename}`);
+          } else {
+            logger.error(`[Screenshot] ✗ Upload failed after ${uploadDuration}ms: ${filename} - ${result.error}`);
+          }
+        }).catch((uploadError) => {
+          const uploadDuration = Date.now() - uploadStartTime;
+          logger.error(`[Screenshot] ✗ Upload error after ${uploadDuration}ms for task ${taskId}:`, uploadError);
+          logger.error(`[Screenshot] Error details:`, uploadError.message, uploadError.stack);
+        });
+      } else {
+        logger.warn(`[Screenshot] ⚠ Skipping upload - missing IDs (tenantId: ${trackerInfo.tenantId || 'MISSING'}, projectId: ${trackerInfo.projectId || 'MISSING'}, sessionId: ${trackerInfo.sessionId || 'MISSING'})`);
+      }
 
       // Play screenshot sound
       if (TRACKER_CONFIG.ENABLE_SCREENSHOT_SOUND) {
@@ -667,6 +716,71 @@ class TrackerService {
       keyboardEvents: trackerInfo.keyboardEvents.length,
       mouseEvents: trackerInfo.mouseEvents.length
     };
+  }
+
+  /**
+   * Generate and upload git diff
+   */
+  private async generateAndUploadGitDiff(taskId: string, trackerInfo: ExtendedTrackerInfo): Promise<void> {
+    try {
+      if (!trackerInfo.gitRepoPath || !this.logsDir) {
+        logger.warn(`Cannot generate git diff: missing gitRepoPath or logsDir for task ${taskId}`);
+        return;
+      }
+
+      // Check if it's a valid git repository
+      const gitPath = path.join(trackerInfo.gitRepoPath, '.git');
+      if (!fsSync.existsSync(gitPath)) {
+        logger.warn(`Git repository not found at ${trackerInfo.gitRepoPath}`);
+        return;
+      }
+
+      // Generate git diff
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `diff-${taskId}-${timestamp}.txt`;
+      const filepath = path.join(this.logsDir, filename);
+
+      try {
+        // Get git diff (staged and unstaged changes)
+        const { stdout: diffOutput } = await execAsync('git diff HEAD', {
+          cwd: trackerInfo.gitRepoPath,
+          timeout: 10000
+        });
+
+        // If no changes, try to get diff from start of tracking
+        // For now, we'll use HEAD diff. In the future, we could store the initial commit hash
+        if (!diffOutput || diffOutput.trim().length === 0) {
+          logger.info(`No git changes found for task ${taskId}`);
+          // Still create an empty file to indicate we checked
+          await fs.writeFile(filepath, 'No changes detected.\n');
+        } else {
+          await fs.writeFile(filepath, diffOutput);
+        }
+
+        // Upload to S3
+        if (trackerInfo.tenantId && trackerInfo.projectId && trackerInfo.sessionId) {
+          const result = await S3UploadService.uploadRepoDiff(
+            filepath,
+            trackerInfo.tenantId,
+            trackerInfo.projectId,
+            trackerInfo.sessionId,
+            taskId
+          );
+
+          if (result.success) {
+            logger.info(`Successfully uploaded git diff for task ${taskId}`);
+          } else {
+            logger.error(`Failed to upload git diff for task ${taskId}: ${result.error}`);
+          }
+        }
+      } catch (gitError: any) {
+        logger.error(`Error generating git diff for task ${taskId}:`, gitError.message);
+        // Create a file with the error message
+        await fs.writeFile(filepath, `Error generating git diff: ${gitError.message}\n`);
+      }
+    } catch (error: any) {
+      logger.error(`Failed to generate/upload git diff for task ${taskId}:`, error);
+    }
   }
 
   /**

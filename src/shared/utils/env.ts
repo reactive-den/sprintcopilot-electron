@@ -26,3 +26,9 @@ export function getEnvironment(): 'development' | 'production' {
   return isDevelopment() ? 'development' : 'production';
 }
 
+/**
+ * Get API base URL from environment
+ */
+export function getApiBaseUrl(): string {
+  return process.env.API_BASE_URL || 'http://localhost:3000';
+}
