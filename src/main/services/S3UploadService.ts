@@ -31,10 +31,24 @@ class S3UploadService {
   private baseUrl: string;
 
   constructor() {
-    // Get base URL from environment variable, default to localhost for development
-    this.baseUrl = process.env.API_BASE_URL || 'http://localhost:3000';
-    logger.info(`[S3UploadService] Initialized with API Base URL: ${this.baseUrl}`);
-    logger.info(`[S3UploadService] API_BASE_URL env var: ${process.env.API_BASE_URL || 'NOT SET (using default)'}`);
+    // Get base URL from environment variable, default to localhost:3001
+    const envApiUrl = process.env.API_BASE_URL;
+    this.baseUrl = envApiUrl || 'http://localhost:3001';
+    
+    logger.info(`[S3UploadService] ========================================`);
+    logger.info(`[S3UploadService] API BASE URL CONFIGURATION`);
+    logger.info(`[S3UploadService] ========================================`);
+    logger.info(`[S3UploadService] Environment Variable (API_BASE_URL): ${envApiUrl || 'NOT SET'}`);
+    logger.info(`[S3UploadService] Using Base URL: ${this.baseUrl}`);
+    logger.info(`[S3UploadService] Full Presign Endpoint: ${this.baseUrl}/api/uploads/presign`);
+    logger.info(`[S3UploadService] ========================================`);
+  }
+
+  /**
+   * Get the current base URL being used
+   */
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /**
@@ -67,15 +81,22 @@ class S3UploadService {
           }
         };
 
-        logger.info(`[S3Upload] Request options:`, {
-          hostname: requestOptions.hostname,
-          port: requestOptions.port,
-          path: requestOptions.path,
-          method: requestOptions.method
-        });
+        logger.info(`[S3Upload] ========== PRESIGN API REQUEST ==========`);
+        logger.info(`[S3Upload] Method: ${requestOptions.method}`);
+        logger.info(`[S3Upload] Hostname: ${requestOptions.hostname}`);
+        logger.info(`[S3Upload] Port: ${requestOptions.port}`);
+        logger.info(`[S3Upload] Path: ${requestOptions.path}`);
+        logger.info(`[S3Upload] Full URL: ${url.toString()}`);
+        try {
+          logger.info(`[S3Upload] Request Headers:`, JSON.stringify(requestOptions.headers, null, 2));
+        } catch (e) {
+          logger.info(`[S3Upload] Request Headers:`, requestOptions.headers);
+        }
+        logger.info(`[S3Upload] Request Body:`, requestBody);
+        logger.info(`[S3Upload] =========================================`);
 
         const req = httpModule.request(requestOptions, (res) => {
-          logger.info(`[S3Upload] Response received: Status ${res.statusCode}`);
+          logger.info(`[S3Upload] Presign API Response received`);
           let data = '';
 
           res.on('data', (chunk) => {
@@ -84,24 +105,56 @@ class S3UploadService {
 
           res.on('end', () => {
             try {
+              logger.info(`[S3Upload] ========== PRESIGN API RESPONSE ==========`);
+              logger.info(`[S3Upload] Status Code: ${res.statusCode}`);
+              try {
+                logger.info(`[S3Upload] Response Headers:`, JSON.stringify(res.headers, null, 2));
+              } catch (e) {
+                logger.info(`[S3Upload] Response Headers:`, res.headers);
+              }
+              logger.info(`[S3Upload] Response Body: ${data}`);
+              
               if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
                 const parsed = JSON.parse(data);
-                logger.info(`[S3Upload] Presigned URL received successfully`);
+                logger.info(`[S3Upload] ✓ Presigned URL received successfully`);
+                logger.info(`[S3Upload] Parsed Response:`, JSON.stringify(parsed, null, 2));
+                logger.info(`[S3Upload] Upload URL: ${parsed.uploadUrl ? parsed.uploadUrl.substring(0, 100) + '...' : 'NOT PROVIDED'}`);
+                logger.info(`[S3Upload] =========================================`);
                 resolve(parsed);
               } else {
-                logger.error(`[S3Upload] Presign request failed: HTTP ${res.statusCode}`);
-                logger.error(`[S3Upload] Response: ${data}`);
+                logger.error(`[S3Upload] ✗✗✗ PRESIGN REQUEST FAILED ✗✗✗`);
+                logger.error(`[S3Upload] Status Code: ${res.statusCode}`);
+                logger.error(`[S3Upload] Requested URL: ${url.toString()}`);
+                logger.error(`[S3Upload] API Base URL: ${this.baseUrl}`);
+                logger.error(`[S3Upload] Endpoint: /api/uploads/presign`);
+                logger.error(`[S3Upload] Error Response: ${data}`);
+                logger.error(`[S3Upload] =========================================`);
+                logger.error(`[S3Upload] TROUBLESHOOTING:`);
+                logger.error(`[S3Upload] 1. Check if API server is running`);
+                logger.error(`[S3Upload] 2. Verify API_BASE_URL is correct (current: ${this.baseUrl})`);
+                logger.error(`[S3Upload] 3. Ensure endpoint exists: ${this.baseUrl}/api/uploads/presign`);
                 reject(new Error(`HTTP ${res.statusCode}: ${data}`));
               }
             } catch (error: any) {
-              logger.error(`[S3Upload] Failed to parse presign response: ${error.message}`);
+              logger.error(`[S3Upload] ✗ Failed to parse presign response: ${error.message}`);
+              logger.error(`[S3Upload] Raw response data: ${data}`);
+              logger.error(`[S3Upload] =========================================`);
               reject(new Error(`Failed to parse response: ${error.message}`));
             }
           });
         });
 
-        req.on('error', (error) => {
-          logger.error(`[S3Upload] Network error requesting presigned URL:`, error);
+        req.on('error', (error: any) => {
+          logger.error(`[S3Upload] ✗✗✗ NETWORK ERROR ✗✗✗`);
+          logger.error(`[S3Upload] Error: ${error.message}`);
+          logger.error(`[S3Upload] Error Code: ${error.code || 'N/A'}`);
+          logger.error(`[S3Upload] Requested URL: ${url.toString()}`);
+          logger.error(`[S3Upload] API Base URL: ${this.baseUrl}`);
+          logger.error(`[S3Upload] =========================================`);
+          logger.error(`[S3Upload] TROUBLESHOOTING:`);
+          logger.error(`[S3Upload] 1. Check if API server is running at ${this.baseUrl}`);
+          logger.error(`[S3Upload] 2. Verify network connectivity`);
+          logger.error(`[S3Upload] 3. Check firewall/security settings`);
           reject(error);
         });
 
@@ -143,17 +196,24 @@ class S3UploadService {
           }
         };
 
-        logger.info(`[S3Upload] S3 Request options:`, {
-          hostname: requestOptions.hostname,
-          port: requestOptions.port,
-          path: requestOptions.path.substring(0, 100) + '...',
-          method: requestOptions.method,
-          contentType: contentType,
-          fileSize: fileBuffer.length
-        });
+        logger.info(`[S3Upload] ========== S3 UPLOAD API REQUEST ==========`);
+        logger.info(`[S3Upload] Method: ${requestOptions.method}`);
+        logger.info(`[S3Upload] Hostname: ${requestOptions.hostname}`);
+        logger.info(`[S3Upload] Port: ${requestOptions.port}`);
+        logger.info(`[S3Upload] Path: ${requestOptions.path.substring(0, 150)}...`);
+        logger.info(`[S3Upload] Content-Type: ${contentType}`);
+        logger.info(`[S3Upload] Content-Length: ${fileBuffer.length} bytes`);
+        logger.info(`[S3Upload] Full URL: ${uploadUrl.substring(0, 150)}...`);
+        logger.info(`[S3Upload] =========================================`);
 
         const req = httpModule.request(requestOptions, (res) => {
-          logger.info(`[S3Upload] S3 Response received: Status ${res.statusCode}`);
+          logger.info(`[S3Upload] ========== S3 UPLOAD API RESPONSE ==========`);
+          logger.info(`[S3Upload] Status Code: ${res.statusCode}`);
+          try {
+            logger.info(`[S3Upload] Response Headers:`, JSON.stringify(res.headers, null, 2));
+          } catch (e) {
+            logger.info(`[S3Upload] Response Headers:`, res.headers);
+          }
           let data = '';
 
           res.on('data', (chunk) => {
@@ -161,19 +221,74 @@ class S3UploadService {
           });
 
           res.on('end', () => {
+            logger.info(`[S3Upload] Response Body: ${data || '(empty)'}`);
+            
+            // Handle 301 PermanentRedirect from S3
+            // Note: S3 301 responses don't have Location headers - they return XML with the correct endpoint
+            // The presigned URL must be regenerated by the API server with the correct endpoint
+            if (res.statusCode === 301) {
+              logger.error(`[S3Upload] ✗✗✗ S3 301 PERMANENT REDIRECT ✗✗✗`);
+              logger.error(`[S3Upload] The presigned URL is using the wrong S3 endpoint/region.`);
+              logger.error(`[S3Upload] This cannot be fixed by following redirects - the API server must regenerate the presigned URL.`);
+              
+              // Parse the error XML to show the correct endpoint
+              if (data.includes('<Error>')) {
+                const endpointMatch = data.match(/<Endpoint>(.*?)<\/Endpoint>/);
+                const bucketMatch = data.match(/<Bucket>(.*?)<\/Bucket>/);
+                if (endpointMatch) {
+                  logger.error(`[S3Upload] Correct S3 Endpoint: ${endpointMatch[1]}`);
+                }
+                if (bucketMatch) {
+                  logger.error(`[S3Upload] S3 Bucket: ${bucketMatch[1]}`);
+                }
+              }
+              
+              logger.error(`[S3Upload] SOLUTION:`);
+              logger.error(`[S3Upload] Update your API server at ${this.baseUrl} to generate presigned URLs`);
+              logger.error(`[S3Upload] with the correct S3 region/endpoint that matches your bucket location.`);
+              logger.error(`[S3Upload] =========================================`);
+              
+              reject(new Error(`S3 301 PermanentRedirect: Presigned URL uses wrong endpoint. API server must regenerate with correct region.`));
+              return;
+            }
+            
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
               // Extract file key from response headers or URL if available
               const requestIdHeader = res.headers['x-amz-request-id'];
               const requestId = Array.isArray(requestIdHeader) ? requestIdHeader[0] : requestIdHeader;
               const fileKey = requestId || urlObj.pathname.split('/').pop() || undefined;
-              logger.info(`[S3Upload] ✓ File uploaded to S3 successfully (status: ${res.statusCode}, fileKey: ${fileKey})`);
+              
+              logger.info(`[S3Upload] ✓✓✓ S3 UPLOAD SUCCESS ✓✓✓`);
+              logger.info(`[S3Upload] Status: ${res.statusCode}`);
+              logger.info(`[S3Upload] File Key: ${fileKey || 'N/A'}`);
+              logger.info(`[S3Upload] Request ID: ${requestId || 'N/A'}`);
+              logger.info(`[S3Upload] =========================================`);
+              
               resolve({
                 success: true,
                 fileKey: fileKey
               });
             } else {
-              logger.error(`[S3Upload] ✗ S3 upload failed with status ${res.statusCode}`);
-              logger.error(`[S3Upload] Response: ${data}`);
+              logger.error(`[S3Upload] ✗✗✗ S3 UPLOAD FAILED ✗✗✗`);
+              logger.error(`[S3Upload] Status: ${res.statusCode}`);
+              logger.error(`[S3Upload] Error Response: ${data}`);
+              
+              // Parse S3 error XML if present
+              if (data.includes('<Error>')) {
+                const endpointMatch = data.match(/<Endpoint>(.*?)<\/Endpoint>/);
+                const bucketMatch = data.match(/<Bucket>(.*?)<\/Bucket>/);
+                if (endpointMatch) {
+                  logger.error(`[S3Upload] S3 Error - Correct Endpoint: ${endpointMatch[1]}`);
+                }
+                if (bucketMatch) {
+                  logger.error(`[S3Upload] S3 Error - Bucket: ${bucketMatch[1]}`);
+                }
+                logger.error(`[S3Upload] TROUBLESHOOTING:`);
+                logger.error(`[S3Upload] The presigned URL may be using the wrong S3 endpoint/region.`);
+                logger.error(`[S3Upload] Check your API server's S3 configuration and region settings.`);
+              }
+              
+              logger.error(`[S3Upload] =========================================`);
               reject(new Error(`S3 upload failed with status ${res.statusCode}: ${data}`));
             }
           });

@@ -36,7 +36,7 @@ const loadRobot = async () => {
 
 // Configuration - Easy to change
 const TRACKER_CONFIG: TrackerConfig = {
-  SCREENSHOT_INTERVAL: 1 * 60 * 1000, // 1 minutes in milliseconds (for testing)
+  SCREENSHOT_INTERVAL: 5 * 1000, // 5 seconds in milliseconds
   // For production: 5 * 60 * 1000 (5 minutes) or 10 * 60 * 1000 (10 minutes)
 
   ENABLE_KEYBOARD_TRACKING: true,
