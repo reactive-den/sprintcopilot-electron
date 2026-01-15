@@ -213,9 +213,26 @@ export interface InputEvent {
 }
 
 export interface ScreenshotMetadata {
+  id: string;
   path: string;
   timestamp: string;
   taskId: string;
+  diffPath?: string;
+  diffKey?: string;
+  diffContent?: string;
+  diffTruncated?: boolean;
+  diffError?: string;
+  git?: GitSnapshotInfo;
+}
+
+export interface GitSnapshotInfo {
+  branch: string;
+  headCommit: string;
+  upstream?: string;
+  ahead?: number;
+  behind?: number;
+  commits?: string[];
+  error?: string;
 }
 
 export interface TrackerMetadata {
@@ -352,4 +369,3 @@ export type DirectorySelectedCallback = (path: string) => void;
 export type ProjectSelectedCallback = (project: Project) => void;
 export type NavigationCallback = (view: ViewType, data?: any) => void;
 export type RenderCallback = () => void;
-

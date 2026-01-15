@@ -11,7 +11,7 @@ import { GlobalKeyboardListener } from 'node-global-key-listener';
 import logger from '../utils/logger.js';
 import { getUserDataPath } from '../utils/paths.js';
 import S3UploadService from './S3UploadService.js';
-import type { TrackerConfig, TrackerInfo, InputLogger, InputEvent, ScreenshotMetadata, TrackerStatus, TrackerMetadata } from '../../types/index.js';
+import type { TrackerConfig, TrackerInfo, InputLogger, InputEvent, ScreenshotMetadata, TrackerStatus, TrackerMetadata, GitSnapshotInfo } from '../../types/index.js';
 
 const execAsync = promisify(exec);
 
@@ -48,6 +48,9 @@ const TRACKER_CONFIG: TrackerConfig = {
   METADATA_LOG_INTERVAL: 30000 // Log full metadata every 30 seconds
 };
 
+const DIFF_FILE_MAX_BYTES = 2 * 1024 * 1024;
+const DIFF_METADATA_MAX_CHARS = 10000;
+
 interface ExtendedTrackerInfo extends TrackerInfo {
   endTime?: Date;
   duration?: number;
@@ -55,6 +58,8 @@ interface ExtendedTrackerInfo extends TrackerInfo {
   projectId?: string;
   sessionId?: string;
   gitRepoPath?: string;
+  lastSnapshotRef?: string;
+  snapshotIntervalMs?: number;
 }
 
 class TrackerService {
@@ -64,6 +69,7 @@ class TrackerService {
   private metadataLogIntervals: Map<string, NodeJS.Timeout> = new Map();
   private screenshotsDir: string | null = null;
   private logsDir: string | null = null;
+  private diffsDir: string | null = null;
   private globalKeyboardListener: GlobalKeyboardListener | null = null;
 
   constructor() {
@@ -77,8 +83,10 @@ class TrackerService {
     try {
       this.screenshotsDir = path.join(getUserDataPath(), 'screenshots');
       this.logsDir = path.join(getUserDataPath(), 'logs');
+      this.diffsDir = path.join(getUserDataPath(), 'diffs');
       await fs.mkdir(this.screenshotsDir, { recursive: true });
       await fs.mkdir(this.logsDir, { recursive: true });
+      await fs.mkdir(this.diffsDir, { recursive: true });
     } catch (error: any) {
       logger.error('Failed to initialize directories:', error);
     }
@@ -92,6 +100,7 @@ class TrackerService {
       return { success: false, error: 'Tracker already running for this task' };
     }
 
+    const snapshotIntervalMs = this.resolveSnapshotIntervalMs(taskInfo);
     const trackerInfo: ExtendedTrackerInfo = {
       taskId,
       taskName: taskInfo.name || taskId,
@@ -105,7 +114,8 @@ class TrackerService {
       tenantId: taskInfo.tenantId || process.env.TENANT_ID || 'default_tenant',
       projectId: taskInfo.projectId || process.env.PROJECT_ID || 'default_project',
       sessionId: taskInfo.sessionId || `${taskId}-${Date.now()}`,
-      gitRepoPath: taskInfo.gitRepoPath || process.env.GIT_REPO_PATH
+      gitRepoPath: taskInfo.gitRepoPath || process.env.GIT_REPO_PATH,
+      snapshotIntervalMs
     };
 
     this.activeTrackers.set(taskId, trackerInfo);
@@ -125,7 +135,7 @@ class TrackerService {
       taskId,
       startTime: trackerInfo.startTime,
       config: {
-        screenshotInterval: TRACKER_CONFIG.SCREENSHOT_INTERVAL,
+        screenshotInterval: trackerInfo.snapshotIntervalMs || TRACKER_CONFIG.SCREENSHOT_INTERVAL,
         keyboardTracking: TRACKER_CONFIG.ENABLE_KEYBOARD_TRACKING,
         mouseTracking: TRACKER_CONFIG.ENABLE_MOUSE_TRACKING
       }
@@ -212,11 +222,12 @@ class TrackerService {
     this.captureScreenshot(taskId);
 
     // Set up interval
+    const intervalMs = trackerInfo.snapshotIntervalMs || TRACKER_CONFIG.SCREENSHOT_INTERVAL;
     const interval = setInterval(() => {
       if (trackerInfo.running) {
         this.captureScreenshot(taskId);
       }
-    }, TRACKER_CONFIG.SCREENSHOT_INTERVAL);
+    }, intervalMs);
 
     this.screenshotIntervals.set(taskId, interval);
   }
@@ -231,7 +242,8 @@ class TrackerService {
 
       const timestamp = new Date();
       const timestampStr = timestamp.toISOString().replace(/[:.]/g, '-');
-      const filename = `task-${taskId}-${timestampStr}.png`;
+      const screenshotId = `task-${taskId}-${timestampStr}`;
+      const filename = `${screenshotId}.png`;
       const filepath = path.join(this.screenshotsDir, filename);
 
       // Capture screenshot using screenshot-desktop
@@ -241,13 +253,23 @@ class TrackerService {
 
       // Store screenshot metadata
       const screenshotMetadata: ScreenshotMetadata = {
+        id: screenshotId,
         timestamp: timestamp.toISOString(),
         path: filepath,
         taskId
       };
 
+      const diffResult = await this.captureDiffForScreenshot(taskId, trackerInfo, screenshotId);
+      screenshotMetadata.diffPath = diffResult.diffPath;
+      screenshotMetadata.diffKey = diffResult.diffKey;
+      screenshotMetadata.diffContent = diffResult.diffContent;
+      screenshotMetadata.diffTruncated = diffResult.diffTruncated;
+      screenshotMetadata.diffError = diffResult.diffError;
+      screenshotMetadata.git = diffResult.git;
+
       trackerInfo.screenshotCount++;
       trackerInfo.screenshots.push(screenshotMetadata);
+      await this.saveScreenshotMetadata(screenshotMetadata);
 
       // Upload screenshot to S3 (async, don't wait)
       logger.info(`[Screenshot] Checking upload conditions for ${filename}...`);
@@ -320,6 +342,194 @@ class TrackerService {
       }
     } catch (error) {
       // Silent fail for sound
+    }
+  }
+
+  private resolveSnapshotIntervalMs(taskInfo: any): number {
+    if (typeof taskInfo?.snapshotIntervalMinutes === 'number') {
+      return taskInfo.snapshotIntervalMinutes * 60 * 1000;
+    }
+    if (typeof taskInfo?.snapshotIntervalMs === 'number') {
+      return taskInfo.snapshotIntervalMs;
+    }
+    return TRACKER_CONFIG.SCREENSHOT_INTERVAL;
+  }
+
+  private async captureDiffForScreenshot(
+    taskId: string,
+    trackerInfo: ExtendedTrackerInfo,
+    screenshotId: string
+  ): Promise<{
+    diffPath?: string;
+    diffKey?: string;
+    diffContent?: string;
+    diffTruncated?: boolean;
+    diffError?: string;
+    git?: GitSnapshotInfo;
+  }> {
+    if (!trackerInfo.gitRepoPath || !this.diffsDir) {
+      return { diffError: 'Missing gitRepoPath or diffs directory' };
+    }
+
+    const gitPath = path.join(trackerInfo.gitRepoPath, '.git');
+    if (!fsSync.existsSync(gitPath)) {
+      return { diffError: 'Git repository not found' };
+    }
+
+    const result: {
+      diffPath?: string;
+      diffKey?: string;
+      diffContent?: string;
+      diffTruncated?: boolean;
+      diffError?: string;
+      git?: GitSnapshotInfo;
+    } = {};
+
+    try {
+      const hadBaseline = Boolean(trackerInfo.lastSnapshotRef);
+      const currentRef = await this.getSnapshotRef(trackerInfo.gitRepoPath);
+      const baseRef = trackerInfo.lastSnapshotRef || currentRef;
+      const diffOutput = baseRef === currentRef
+        ? ''
+        : await this.getGitDiff(trackerInfo.gitRepoPath, baseRef, currentRef);
+
+      trackerInfo.lastSnapshotRef = currentRef;
+      result.git = await this.getGitState(trackerInfo.gitRepoPath);
+
+      const diffFileName = `diff-${screenshotId}.patch`;
+      const diffPath = path.join(this.diffsDir, diffFileName);
+      result.diffPath = diffPath;
+
+      let diffContentToWrite = diffOutput;
+      if (!hadBaseline) {
+        diffContentToWrite = 'No baseline available.\n';
+      } else if (!diffOutput || diffOutput.trim().length === 0) {
+        diffContentToWrite = 'No changes detected.\n';
+      }
+
+      const diffBytes = Buffer.byteLength(diffContentToWrite, 'utf8');
+      if (diffBytes > DIFF_FILE_MAX_BYTES) {
+        diffContentToWrite = `${diffContentToWrite.slice(0, DIFF_FILE_MAX_BYTES)}\n\n[Diff truncated]\n`;
+        result.diffTruncated = true;
+      }
+
+      await fs.writeFile(diffPath, diffContentToWrite);
+
+      if (diffContentToWrite.length <= DIFF_METADATA_MAX_CHARS) {
+        result.diffContent = diffContentToWrite;
+      } else {
+        result.diffContent = diffContentToWrite.slice(0, DIFF_METADATA_MAX_CHARS);
+        result.diffTruncated = true;
+      }
+
+      if (trackerInfo.tenantId && trackerInfo.projectId && trackerInfo.sessionId) {
+        const uploadResult = await S3UploadService.uploadRepoDiff(
+          diffPath,
+          trackerInfo.tenantId,
+          trackerInfo.projectId,
+          trackerInfo.sessionId,
+          taskId
+        );
+
+        if (uploadResult.success) {
+          result.diffKey = uploadResult.fileKey;
+        } else {
+          result.diffError = uploadResult.error || 'Diff upload failed';
+        }
+      } else {
+        result.diffError = 'Missing IDs for diff upload';
+      }
+    } catch (error: any) {
+      result.diffError = error.message || 'Diff capture failed';
+    }
+
+    return result;
+  }
+
+  private async getSnapshotRef(repoPath: string): Promise<string> {
+    try {
+      const { stdout } = await execAsync('git stash create "sprintcopilot-snapshot"', {
+        cwd: repoPath,
+        timeout: 5000
+      });
+      const ref = stdout.trim();
+      if (ref) return ref;
+    } catch (error) {
+      // Fall through to HEAD
+    }
+
+    const { stdout } = await execAsync('git rev-parse HEAD', {
+      cwd: repoPath,
+      timeout: 5000
+    });
+    return stdout.trim();
+  }
+
+  private async getGitDiff(repoPath: string, baseRef: string, headRef: string): Promise<string> {
+    const { stdout } = await execAsync(`git diff ${baseRef} ${headRef}`, {
+      cwd: repoPath,
+      timeout: 10000
+    });
+    return stdout || '';
+  }
+
+  private async getGitState(repoPath: string): Promise<GitSnapshotInfo> {
+    const state: GitSnapshotInfo = {
+      branch: '',
+      headCommit: ''
+    };
+    try {
+      const branchResult = await execAsync('git rev-parse --abbrev-ref HEAD', {
+        cwd: repoPath,
+        timeout: 5000
+      });
+      state.branch = branchResult.stdout.trim();
+
+      const headResult = await execAsync('git rev-parse HEAD', {
+        cwd: repoPath,
+        timeout: 5000
+      });
+      state.headCommit = headResult.stdout.trim();
+
+      try {
+        const upstreamResult = await execAsync('git rev-parse --abbrev-ref @{upstream}', {
+          cwd: repoPath,
+          timeout: 5000
+        });
+        state.upstream = upstreamResult.stdout.trim();
+
+        const divergenceResult = await execAsync(`git rev-list --left-right --count ${state.upstream}...HEAD`, {
+          cwd: repoPath,
+          timeout: 5000
+        });
+        const [behind, ahead] = divergenceResult.stdout.trim().split(/\s+/).map(Number);
+        state.behind = Number.isFinite(behind) ? behind : 0;
+        state.ahead = Number.isFinite(ahead) ? ahead : 0;
+
+        const commitsResult = await execAsync(`git log --pretty=format:%H ${state.upstream}..HEAD`, {
+          cwd: repoPath,
+          timeout: 5000
+        });
+        const commits = commitsResult.stdout.trim();
+        state.commits = commits ? commits.split('\n') : [];
+      } catch (upstreamError) {
+        // No upstream configured
+      }
+    } catch (error: any) {
+      state.error = error.message || 'Failed to read git state';
+    }
+    return state;
+  }
+
+  private async saveScreenshotMetadata(metadata: ScreenshotMetadata): Promise<void> {
+    if (!this.logsDir) return;
+    try {
+      const metadataDir = path.join(this.logsDir, 'screenshot-metadata');
+      await fs.mkdir(metadataDir, { recursive: true });
+      const filepath = path.join(metadataDir, `${metadata.id}.json`);
+      await fs.writeFile(filepath, JSON.stringify(metadata, null, 2));
+    } catch (error: any) {
+      logger.error(`Failed to save screenshot metadata for ${metadata.id}:`, error.message);
     }
   }
 
@@ -815,4 +1025,3 @@ class TrackerService {
 }
 
 export default new TrackerService();
-
